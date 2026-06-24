@@ -1,12 +1,7 @@
-"""Daily self-diagnostic for the persistent Claude session.
+"""Daily self-diagnostic using OpenCode.
 
-The "Doctor" the user asked for: once a day it asks the live session a canary
-question (the authoritative check that auth + model + plumbing all work — a
-silently-expired login is invisible to `claude auth status`), runs a handful
-of cheap local checks, and reports a single 🟢/🔴 message to Telegram.
-
-Run by a systemd timer and as the final step of install (install success ==
-first green).
+Once a day it asks the model a canary question, runs a handful of cheap
+local checks, and reports a single 🟢/🔴 message to Telegram.
 """
 
 import logging
@@ -16,6 +11,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from d_brain.services.opencode_session import OpenCodeSession
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +43,7 @@ class DoctorReport:
 class Doctor:
     def __init__(
         self,
-        session: Any,
+        session: OpenCodeSession | Any,
         *,
         checks: list[Callable[[], CheckResult]] | None = None,
         canary_token: str = CANARY_TOKEN,
@@ -62,11 +59,11 @@ class Doctor:
             request_id="maint-doctor",
         )
         if res.status == "logged_out":
-            return CheckResult("canary", False, "Claude разлогинился — нужен вход")
+            return CheckResult("canary", False, "нужен повторный вход")
         if res.status == "rate_limited":
-            return CheckResult("canary", False, "лимит подписки исчерпан")
+            return CheckResult("canary", False, "лимит исчерпан")
         if res.ok and self._canary_token in (res.reply or ""):
-            return CheckResult("canary", True, "сессия отвечает")
+            return CheckResult("canary", True, "модель отвечает")
         return CheckResult("canary", False, res.detail or res.status)
 
     def run(self) -> DoctorReport:
@@ -74,14 +71,11 @@ class Doctor:
         for check in self._checks:
             try:
                 checks.append(check())
-            except Exception as exc:  # noqa: BLE001 — a check must never crash the doctor
+            except Exception as exc:
                 checks.append(
                     CheckResult(getattr(check, "__name__", "check"), False, str(exc))
                 )
         return DoctorReport(ok=all(c.ok for c in checks), checks=checks)
-
-
-# ── built-in local checks (used by main(); injected/faked in tests) ──────
 
 
 def check_disk(runtime_dir: Path, min_bytes: int = 500_000_000) -> CheckResult:
@@ -90,21 +84,15 @@ def check_disk(runtime_dir: Path, min_bytes: int = 500_000_000) -> CheckResult:
     return CheckResult("disk", free >= min_bytes, f"{gb:.1f} GB свободно")
 
 
-def check_claude_version(claude_bin: str | None = None) -> CheckResult:
-    # Manual runs (ssh, cron) often lack ~/.local/bin in PATH — resolve the
-    # binary the way the install lays it out instead of false-alarming.
-    bin_ = (
-        claude_bin
-        or shutil.which("claude")
-        or str(Path.home() / ".local" / "bin" / "claude")
-    )
+def check_opencode_version(opencode_bin: str | None = None) -> CheckResult:
+    bin_ = opencode_bin or shutil.which("opencode") or "opencode"
     try:
         out = subprocess.run(
             [bin_, "--version"], capture_output=True, text=True, timeout=15
         )
-        return CheckResult("claude", out.returncode == 0, out.stdout.strip() or "ok")
+        return CheckResult("opencode", out.returncode == 0, out.stdout.strip() or "ok")
     except (OSError, subprocess.SubprocessError) as exc:
-        return CheckResult("claude", False, str(exc))
+        return CheckResult("opencode", False, str(exc))
 
 
 def check_env(settings: Any) -> CheckResult:
@@ -121,16 +109,14 @@ def check_env(settings: Any) -> CheckResult:
     )
 
 
-def run_cli(session: Any, *, checks: list, alert: Any) -> int:
-    """Run the checks, deliver the report, map health to an exit code —
-    upgrade.sh and the systemd OnFailure= hook key off that code."""
+def run_cli(session: OpenCodeSession, *, checks: list, alert: Any) -> int:
     report = Doctor(session, checks=checks).run()
     alert(report.to_telegram())
     logger.info("doctor: ok=%s", report.ok)
     return 0 if report.ok else 1
 
 
-def main() -> None:  # pragma: no cover
+def main() -> None:
     logging.basicConfig(level=logging.INFO)
     from d_brain.config import get_settings
     from d_brain.services.runtime import get_session
@@ -140,7 +126,7 @@ def main() -> None:  # pragma: no cover
     session = get_session(settings)
     checks = [
         lambda: check_disk(settings.runtime_dir),
-        lambda: check_claude_version(),
+        lambda: check_opencode_version(settings.opencode_bin),
         lambda: check_env(settings),
     ]
     raise SystemExit(

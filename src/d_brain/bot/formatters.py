@@ -2,6 +2,7 @@
 
 import asyncio
 import html
+import json
 import re
 from typing import Any
 
@@ -154,6 +155,68 @@ def _truncate_html_consumed(text: str, max_length: int) -> tuple[str, int]:
     return truncated + "..." + closing_tags, cut_point
 
 
+def _extract_from_claude_json(text: str) -> str | None:
+    """Try to extract readable text from Claude's JSON output.
+
+    Claude in --print mode sometimes outputs JSON (tool results, file contents).
+    This function attempts to extract meaningful text from common JSON patterns.
+    """
+    text = text.strip()
+    if not text:
+        return None
+
+    json_start = text.find("[")
+    json_start = json_start if json_start >= 0 else text.find("{")
+    if json_start < 0:
+        return None
+
+    candidate = text[json_start:]
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        for close_char in ("]", "}"):
+            end = candidate.rfind(close_char)
+            if end > 0:
+                try:
+                    data = json.loads(candidate[: end + 1])
+                    break
+                except json.JSONDecodeError:
+                    continue
+        else:
+            return None
+
+    parts: list[str] = []
+
+    if isinstance(data, dict):
+        if "content" in data and isinstance(data["content"], list):
+            for item in data["content"]:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        parts.append(item.get("text", ""))
+                    elif "text" in item:
+                        parts.append(item["text"])
+        elif "text" in data and isinstance(data["text"], str):
+            parts.append(data["text"])
+        elif all(isinstance(v, str) for v in data.values()):
+            for k, v in data.items():
+                parts.append(f"{k}: {v}")
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+                elif "text" in item:
+                    parts.append(item["text"])
+                elif "content" in item and isinstance(item["content"], str):
+                    parts.append(item["content"])
+            elif isinstance(item, str):
+                parts.append(item)
+
+    if parts:
+        return "\n\n".join(part for part in parts if part)
+    return None
+
+
 def format_process_report(report: dict[str, Any]) -> str:
     """Format processing report for Telegram HTML.
 
@@ -172,6 +235,11 @@ def format_process_report(report: dict[str, Any]) -> str:
 
     if "report" in report:
         raw_report = report["report"]
+
+        # Try to extract text if Claude returned JSON
+        extracted = _extract_from_claude_json(raw_report)
+        if extracted is not None:
+            raw_report = extracted
 
         # Sanitize HTML, keeping allowed tags
         sanitized = sanitize_telegram_html(raw_report)

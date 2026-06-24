@@ -1,6 +1,6 @@
 # Phase 2: EXECUTE
 
-Read capture.json from Phase 1. Record tasks in the vault, save thoughts, update CRM.
+Read capture.json from Phase 1. Create Todoist tasks, save thoughts, update CRM.
 
 ## Input
 - `.session/capture.json` — output from Phase 1
@@ -9,17 +9,25 @@ Read capture.json from Phase 1. Record tasks in the vault, save thoughts, update
 
 ## Task
 
-### 1. Record tasks in the vault
+### 1. Create Todoist tasks
 
-For each entry with `classification: "task"`, add a checklist entry to the
-daily note (or the relevant project note):
+For each entry with `classification: "task"`:
 
-```markdown
-## Tasks
-- [ ] {task} (due: {date}, priority: {p1-p4})
+```bash
+mcp-cli call todoist add-tasks '{"tasks": [{"content": "...", "dueString": "...", "priority": N}]}'
 ```
 
-### 2. Save thoughts
+Record created task IDs.
+
+### 2. Check process goals
+
+```bash
+mcp-cli call todoist find-tasks '{"labels": ["process-goal"]}'
+```
+
+If missing or stale → create from goals.
+
+### 3. Save thoughts
 
 For each entry with classification idea/reflection/learning/project:
 - Create file in `thoughts/{category}/YYYY-MM-DD-slug.md`
@@ -44,7 +52,23 @@ For all created/updated files:
 - Add wiki-links with context phrases
 - Update frontmatter `related:[]`
 
+### 6. Check workload
 
+```bash
+mcp-cli call todoist find-tasks-by-date '{"startDate": "today", "daysCount": 7}'
+```
+
+## mcp-cli retry algorithm
+
+```
+1. Call mcp-cli
+2. Error? Wait 10 sec, read vault files
+3. Call again
+4. Error? Wait 20 sec
+5. Call third time — GUARANTEED to work
+```
+
+NEVER say "MCP unavailable". Always retry 3x.
 
 ## Output Format
 

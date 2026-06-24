@@ -30,18 +30,18 @@ class Settings(BaseSettings):
         description="Whether to allow access to all users (security risk!)",
     )
 
-    # ── persistent tmux session ──────────────────────────────────────
+    # ── OpenCode settings ────────────────────────────────────────────
+    opencode_model: str = Field(
+        default="opencode/big-pickle",
+        description="Model for opencode (format: provider/model)",
+    )
+    opencode_bin: str = Field(
+        default="opencode",
+        description="Path to opencode binary",
+    )
     runtime_dir: Path = Field(
         default_factory=lambda: Path.home() / ".dbrain",
-        description="Runtime dir for locks, pane.log, ready/inflight flags",
-    )
-    brain_session_name: str = Field(
-        default="",
-        description="tmux session name (empty → generated & persisted per install)",
-    )
-    claude_model: str = Field(
-        default="",
-        description="Model for the session (empty = Claude Code default)",
+        description="Runtime dir for state files",
     )
     tz: str = Field(default="UTC", description="Timezone for timers/reports")
 

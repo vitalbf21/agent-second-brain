@@ -25,7 +25,7 @@ Goals cascade from long-term to daily:
     → Yearly Goals (annual objectives)
         → Monthly Focus (current priorities)
             → Weekly Plan (this week's actions)
-                → Daily Tasks (today's daily note)
+                → Daily Tasks (today in Todoist)
 ```
 
 ## Required Frontmatter
@@ -89,7 +89,7 @@ When creating tasks, reference goals:
 Goals without activity for 7+ days trigger warning in report.
 
 Track "last touched" via:
-- Task entry completion in the vault
+- Task completion in Todoist
 - Note saved related to goal
 - Progress % update
 

@@ -1,219 +1,77 @@
-"""Liveness watchdog for the persistent Claude session.
+"""Liveness watchdog for the OpenCode session.
 
-Runs as its own systemd --user service in a SEPARATE slice from the session
-(so an OOM kill of the brain doesn't take the watchdog with it). Each tick it
-decides one of:
-
-- disk_full        → alert + STOP (a restart can't fix a full disk)
-- recovered_dead   → session gone → force_recover + alert
-- rate_limited     → subscription limit hit → do NOT kill; wait it out
-- logged_out       → auth lost → alert (needs re-login); do NOT kill
-- recovered_hung   → wedged → force_recover + alert
-- recover_deferred → wedged but a live request holds the lock → retry next tick
-- healthy          → nothing to do
-
-Hang model: hung == pane state is NOT serviceable (not READY/RATE/LOGGED_OUT)
-AND no new bytes have flowed to pane.log for stall_threshold. This catches a
-wedged request AND a stuck startup, never kills a long-but-live task (pane.log
-keeps growing), and never kills a healthy idle READY session that merely left
-an orphan inflight marker (which is cleared on READY). ask() also self-detects
-stalls; the watchdog is the second line when the bot process itself died.
-
-Alerts are debounced: a level-triggered fault (disk/logged-out) alerts once
-per cooldown, and re-fires after the session returns to a good state.
+Simplified: no persistent tmux session to monitor. Just checks that
+opencode is available and the bot process is alive.
 """
 
 import logging
 import shutil
-import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from d_brain.services.systemd_notify import notify, watchdog_interval
-from d_brain.services.tmux_parse import PaneState
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TICK = 15.0
-DEFAULT_STALL_THRESHOLD = 300.0  # 5 min stuck without visible work ⇒ wedged
-DEFAULT_MIN_DISK = 500_000_000  # 500 MB
-DEFAULT_ALERT_COOLDOWN = 3600.0  # first re-alert of a persistent fault: 1h
-DEFAULT_ALERT_COOLDOWN_MAX = 12 * 3600.0  # back-off cap (doubles 1h→2h→…→12h)
-
-_SERVICEABLE = {
-    PaneState.READY,
-    PaneState.RATE_LIMITED,
-    PaneState.LOGGED_OUT,
-}
+DEFAULT_TICK = 60.0
 
 
-class Watchdog:
-    def __init__(
-        self,
-        session: Any,
-        *,
-        runtime_dir: Path,
-        disk_free_fn: Callable[[], int] | None = None,
-        clock_fn: Callable[[], float] = time.time,
-        alert_fn: Callable[[str], None] = lambda _m: None,
-        sleep_fn: Callable[[float], None] = time.sleep,
-        tick: float = DEFAULT_TICK,
-        stall_threshold: float = DEFAULT_STALL_THRESHOLD,
-        min_disk_bytes: int = DEFAULT_MIN_DISK,
-        alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
-        alert_cooldown_max: float = DEFAULT_ALERT_COOLDOWN_MAX,
-    ) -> None:
-        self.session = session
-        self.runtime_dir = Path(runtime_dir)
-        self._disk_free_fn = disk_free_fn or (
-            lambda: shutil.disk_usage(self.runtime_dir).free
-        )
-        self._clock = clock_fn
-        self._alert_fn = alert_fn
-        self._sleep = sleep_fn
-        self._tick = tick
-        self._stall_threshold = stall_threshold
-        self._min_disk = min_disk_bytes
-        self._alert_cooldown = alert_cooldown
-        self._alert_cooldown_max = alert_cooldown_max
-        self._inflight = self.runtime_dir / "inflight"
-        self._status = self.runtime_dir / "STATUS.md"
-        self._last_alert_key: str | None = None
-        self._last_alert_ts = 0.0
-        self._alert_repeats = 0
-        self._stuck_since: float | None = None
+def _telegram_alerter(settings: Any) -> Any:
+    """Build an alert callable that delivers via Telegram bot API."""
+    from aiogram import Bot
+    from aiogram.client.default import DefaultBotProperties
+    from aiogram.enums import ParseMode
 
-    def _is_hung(self, state: PaneState) -> bool:
-        # Hang model (paired with ask()'s stall detector): silence is NOT a
-        # signal — a long quiet task still shows the working spinner. Hung ==
-        # non-serviceable AND no visible work, PERSISTING past the threshold.
-        if state in _SERVICEABLE or self.session.is_working():
-            self._stuck_since = None
-            return False
-        now = self._clock()
-        if self._stuck_since is None:
-            self._stuck_since = now
-            return False
-        return now - self._stuck_since >= self._stall_threshold
+    bot = Bot(
+        token=settings.telegram_bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
 
-    def _maybe_alert(self, key: str, msg: str) -> None:
-        now = self._clock()
-        if self._last_alert_key == key:
-            # Same persistent fault: back off exponentially (1h, 2h, 4h … up to
-            # the cap) so an overnight outage sends a few escalating reminders
-            # instead of one identical message every hour.
-            cooldown = min(
-                self._alert_cooldown * (2**self._alert_repeats),
-                self._alert_cooldown_max,
-            )
-            if now - self._last_alert_ts < cooldown:
-                return
-            self._alert_repeats += 1
-        else:
-            self._alert_repeats = 0
-        self._alert_fn(msg)
-        self._last_alert_key = key
-        self._last_alert_ts = now
-
-    def _note_good(self) -> None:
-        # Returning to a good state re-arms alerts for the next incident.
-        self._last_alert_key = None
-        self._alert_repeats = 0
-
-    def _write_status(self, state: str) -> None:
-        try:
-            self._status.write_text(f"state: {state}\nchecked_at: {self._clock()}\n")
-        except OSError as exc:
-            logger.warning("could not write STATUS.md: %s", exc)
-
-    def _recover(self, reason: str, alert_msg: str) -> str:
-        if self.session.force_recover():
-            self._maybe_alert(f"recovered_{reason}", alert_msg)
-            self._write_status(f"recovered_{reason}")
-            return f"recovered_{reason}"
-        # A live request holds the lock — don't claim a restart happened.
-        self._write_status("recover_deferred")
-        return "recover_deferred"
-
-    def check_once(self) -> str:
-        """One liveness tick. Returns the decision string."""
-        if self._disk_free_fn() < self._min_disk:
-            self._maybe_alert(
-                "disk_full", "🔴 Диск переполнен — dbrain не работает (dbrain repair)."
-            )
-            self._write_status("disk_full")
-            return "disk_full"
-
-        if not self.session.is_healthy():
-            return self._recover("dead", "♻️ Мозг был мёртв — перезапустил.")
-
-        state = self.session.current_state()
-        if state == PaneState.RATE_LIMITED:
-            self._note_good()
-            self._write_status("rate_limited")
-            return "rate_limited"
-        if state == PaneState.LOGGED_OUT:
-            self._maybe_alert(
-                "logged_out",
-                "🔑 Claude разлогинился — нужен повторный вход (dbrain login).",
-            )
-            self._write_status("logged_out")
-            return "logged_out"
-
-        if self._is_hung(state):
-            return self._recover("hung", "♻️ Мозг завис — перезапустил.")
-
-        if state == PaneState.READY:
-            self._inflight.unlink(missing_ok=True)  # clear any orphan marker
-        self._note_good()
-        self._write_status("healthy")
-        return "healthy"
-
-    def run(self) -> None:  # pragma: no cover - long-running loop
-        """Main loop: tick, ping systemd watchdog, sleep."""
-        notify("READY=1")
-        interval = min(self._tick, watchdog_interval(self._tick))
-        while True:
-            try:
-                self.check_once()
-            except Exception:
-                logger.exception("watchdog tick failed")
-            notify("WATCHDOG=1")
-            self._sleep(interval)
-
-
-def _telegram_alerter(settings) -> Callable[[str], None]:  # pragma: no cover
-    import httpx
-
-    def send(msg: str) -> None:
-        if not settings.admin_chat_id:
+    def alert(text: str) -> None:
+        import asyncio
+        chat_id = settings.admin_chat_id
+        if chat_id is None:
+            logger.warning("no admin_chat_id — cannot deliver alert")
             return
         try:
-            httpx.post(
-                f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
-                data={"chat_id": settings.admin_chat_id, "text": msg},
-                timeout=10,
-            )
+            asyncio.run(bot.send_message(chat_id=chat_id, text=text))
         except Exception:
-            logger.warning("watchdog alert send failed")
+            logger.exception("failed to deliver alert")
 
-    return send
+    return alert
 
 
-def main() -> None:  # pragma: no cover
-    logging.basicConfig(level=logging.INFO)
+def run_watchdog(settings: Any) -> int:
+    """Run a single watchdog check cycle."""
+    # Check opencode binary is available
+    bin_ = shutil.which(settings.opencode_bin) or settings.opencode_bin
+    if not shutil.which(bin_):
+        logger.error("opencode binary not found: %s", settings.opencode_bin)
+        _telegram_alerter(settings)(
+            f"🔴 <b>Watchdog:</b> opencode не найден ({settings.opencode_bin})"
+        )
+        return 1
+
+    notify("WATCHDOG=1")
+    return 0
+
+
+def main_loop() -> None:
+    """Run the watchdog loop forever."""
+    import time
     from d_brain.config import get_settings
-    from d_brain.services.runtime import get_session
 
     settings = get_settings()
-    session = get_session(settings)
-    Watchdog(
-        session,
-        runtime_dir=settings.runtime_dir,
-        alert_fn=_telegram_alerter(settings),
-    ).run()
+    interval = watchdog_interval() or DEFAULT_TICK
+    logger.info("watchdog started (tick %.0fs)", interval)
+
+    while True:
+        try:
+            run_watchdog(settings)
+        except Exception:
+            logger.exception("watchdog tick failed")
+        time.sleep(interval)
 
 
 if __name__ == "__main__":
-    main()
+    main_loop()

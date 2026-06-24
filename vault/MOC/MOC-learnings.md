@@ -4,7 +4,7 @@ Map of Content for learnings and insights.
 
 ## Recent
 
-<!-- New learnings will appear here -->
+- [[2026-03-01-immo-off-services-comparison]] — Сравнение сервисов IMMO OFF (OtoCheck, CarLabImmo и др.)
 
 ## By Topic
 

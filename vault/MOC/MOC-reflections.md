@@ -4,7 +4,7 @@ Map of Content for personal reflections.
 
 ## Recent
 
-<!-- Recent reflections will appear here -->
+- [[thoughts/reflections/2026-02-09-morning-routine-530]] — Утренняя рутина: подъём в 5:30
 
 ## By Theme
 

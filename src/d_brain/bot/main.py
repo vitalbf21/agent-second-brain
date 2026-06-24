@@ -13,7 +13,6 @@ from aiogram.types import Update
 
 from d_brain.config import Settings
 from d_brain.services.cron_runner import run_cron
-from d_brain.services.runtime import get_session
 from d_brain.services.systemd_notify import notify, watchdog_interval
 
 logger = logging.getLogger(__name__)
@@ -101,13 +100,6 @@ async def run_bot(settings: Settings) -> None:
 
     # Always add auth middleware for security (it handles allow_all_users internally)
     dp.update.middleware(create_auth_middleware(settings))
-
-    # Bring the persistent Claude session up before serving requests; failure
-    # here is non-fatal (ask() will retry ensure on demand).
-    try:
-        await asyncio.to_thread(get_session(settings).ensure_session)
-    except Exception:
-        logger.exception("Claude session failed to start at boot; retrying on demand")
 
     notify("READY=1")
     pinger = asyncio.create_task(_watchdog_pinger())
