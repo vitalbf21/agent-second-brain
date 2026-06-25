@@ -2,6 +2,8 @@
 type: monthly
 period: YYYY-MM
 updated: YYYY-MM-DD
+relevance: 0.1
+tier: archive
 ---
 
 # Monthly Focus

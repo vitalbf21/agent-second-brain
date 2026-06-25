@@ -3,6 +3,8 @@ type: vision
 horizon: 3-years
 period: 2025-2027
 updated: YYYY-MM-DD
+relevance: 0.1
+tier: archive
 ---
 
 # Vision 2025-2027

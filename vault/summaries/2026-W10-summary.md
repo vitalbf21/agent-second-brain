@@ -2,6 +2,8 @@
 date: 2026-03-05
 type: weekly-summary
 week: 2026-W10
+relevance: 0.1
+tier: archive
 ---
 
 Готово. Вот HTML-дайджест для Telegram:

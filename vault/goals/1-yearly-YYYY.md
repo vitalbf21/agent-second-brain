@@ -2,6 +2,8 @@
 type: yearly
 period: YYYY
 updated: YYYY-MM-DD
+relevance: 0.1
+tier: archive
 ---
 
 # Goals YYYY

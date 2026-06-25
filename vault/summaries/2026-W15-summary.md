@@ -2,6 +2,8 @@
 date: 2026-04-10
 type: weekly-summary
 week: 2026-W15
+relevance: 0.1
+tier: archive
 ---
 
 Данные собраны. Генерирую отчёт.

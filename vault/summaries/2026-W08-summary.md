@@ -2,6 +2,8 @@
 date: 2026-02-19
 type: weekly-summary
 week: 2026-W08
+relevance: 0.1
+tier: archive
 ---
 
 Все данные собраны. Генерирую HTML-дайджест:

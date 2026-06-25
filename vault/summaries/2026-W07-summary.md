@@ -2,6 +2,8 @@
 date: 2026-02-12
 type: weekly-summary
 week: 2026-W07
+relevance: 0.1
+tier: archive
 ---
 
 Now I have all the data. Let me compile the weekly digest.

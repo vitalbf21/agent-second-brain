@@ -2,6 +2,8 @@
 type: weekly
 week: YYYY-WWW
 updated: YYYY-MM-DD
+relevance: 0.1
+tier: archive
 ---
 
 # Weekly Focus

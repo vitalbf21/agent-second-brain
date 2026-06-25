@@ -2,6 +2,8 @@
 date: 2026-03-19
 type: weekly-summary
 week: 2026-W12
+relevance: 0.1
+tier: archive
 ---
 
 Дайджест готов и сохранён в `vault/daily/2026-03-19-weekly-digest.html`.

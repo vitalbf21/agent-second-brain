@@ -2,6 +2,8 @@
 date: 2026-03-12
 type: weekly-summary
 week: 2026-W11
+relevance: 0.1
+tier: archive
 ---
 
 Now here's the HTML digest for Telegram:
