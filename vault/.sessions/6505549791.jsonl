@@ -21,3 +21,6 @@
 {"ts": "2026-06-29T17:16:54.352945+03:00", "type": "text", "text": "Ты в деле", "msg_id": 623}
 {"ts": "2026-06-29T17:19:37.562910+03:00", "type": "text", "text": "Мне нужно тебе отправлять голосовые сообщения, но обрабатывается с ошибкой", "msg_id": 625}
 {"ts": "2026-06-29T17:20:21.521243+03:00", "type": "text", "text": "Error: headers: {'content-type': 'application/json', 'dg-error': 'Invalid credentials.', 'vary': 'origin, access-control-request-method, access-control-request-headers, accept-encoding', 'access-control-allo", "msg_id": 627}
+{"ts": "2026-07-20T05:10:24.005817+03:00", "type": "text", "text": "Какие дела", "msg_id": 655}
+{"ts": "2026-07-20T05:10:40.506372+03:00", "type": "command", "cmd": "/status"}
+{"ts": "2026-07-20T14:37:36.687261+03:00", "type": "text", "text": "Тест", "msg_id": 666}

@@ -45,6 +45,20 @@ class Settings(BaseSettings):
     )
     tz: str = Field(default="UTC", description="Timezone for timers/reports")
 
+    # ── webhook settings ──────────────────────────────────────────────
+    webhook_enabled: bool = Field(
+        default=True,
+        description="Use webhook instead of polling",
+    )
+    webhook_host: str = Field(
+        default="https://bot.immooff.online",
+        description="Public URL for Telegram webhook (https://...)",
+    )
+    webhook_port: int = Field(
+        default=8443,
+        description="Local port for webhook server",
+    )
+
     # ── cron (scheduled jobs in the second brain session) ────────────
     cron_enabled: bool = Field(
         default=True,
