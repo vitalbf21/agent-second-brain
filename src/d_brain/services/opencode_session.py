@@ -49,7 +49,7 @@ class OpenCodeSession:
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self.work_dir = Path(work_dir)
-        self.model = model or "claude-sonnet-4-20250514"
+        self.model = model or "mimi-v2.5"
         self._timeout = timeout
 
     def ask(
