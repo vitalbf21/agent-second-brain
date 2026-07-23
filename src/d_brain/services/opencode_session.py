@@ -1,7 +1,7 @@
-"""Drive the AI engine via direct Z.AI Anthropic-compatible API calls.
+"""Drive the AI engine via MiMo API (OpenAI-compatible endpoint).
 
-Uses Z.AI's API at https://api.z.ai/api/anthropic which provides GLM models
-through an Anthropic-compatible chat completions endpoint.
+Uses MiMo's API at https://lizh.ai/v1 which provides mimo models
+through an OpenAI-compatible chat completions endpoint.
 
 The interface mirrors AskResult so the rest of the app
 works without changes.
@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 600
 
-ZAI_API_KEY = "ad48e79723774b20a1456939b208b0de.9MB26qdS3G5Ipu3H"
-ZAI_BASE_URL = "https://api.z.ai/api/anthropic"
+MIMO_API_KEY = "sk-8IYzMTzSIFjY8OpYqUOg0QpFqKBhNME7rfLAm85xN5zQLULQ"
+MIMO_BASE_URL = "https://lizh.ai/v1"
 
 
 class AskResult:
@@ -37,7 +37,7 @@ class AskResult:
 
 
 class OpenCodeSession:
-    """Drives AI via direct Z.AI Anthropic-compatible API calls."""
+    """Drives AI via MiMo OpenAI-compatible API calls."""
 
     def __init__(
         self,
@@ -49,7 +49,7 @@ class OpenCodeSession:
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self.work_dir = Path(work_dir)
-        self.model = model or "mimi-v2.5"
+        self.model = model or "mimo-v2.5"
         self._timeout = timeout
 
     def ask(
@@ -60,14 +60,14 @@ class OpenCodeSession:
         request_id: str | None = None,
         wrap: bool = True,
     ) -> AskResult:
-        """Send a prompt via Z.AI Anthropic-compatible API and return the reply."""
+        """Send a prompt via MiMo OpenAI-compatible API and return the reply."""
         model = self.model.split("/", 1)[-1] if "/" in self.model else self.model
 
-        logger.info("zai ask (model=%s) len=%d", model, len(prompt))
+        logger.info("mimo ask (model=%s) len=%d", model, len(prompt))
 
         payload = json.dumps({
             "model": model,
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "messages": [{"role": "user", "content": prompt}],
         })
 
@@ -75,9 +75,8 @@ class OpenCodeSession:
             proc = subprocess.run(
                 [
                     "curl", "-s", "-m", str(int((timeout or self._timeout) * 0.9)),
-                    f"{ZAI_BASE_URL}/v1/messages",
-                    "-H", "x-api-key: " + ZAI_API_KEY,
-                    "-H", "anthropic-version: 2023-06-01",
+                    f"{MIMO_BASE_URL}/chat/completions",
+                    "-H", "Authorization: Bearer " + MIMO_API_KEY,
                     "-H", "content-type: application/json",
                     "-d", payload,
                 ],
@@ -88,7 +87,7 @@ class OpenCodeSession:
         except subprocess.TimeoutExpired:
             return AskResult("timeout", detail=f"no reply in {timeout or self._timeout}s")
         except Exception as exc:
-            logger.exception("zai api call failed")
+            logger.exception("mimo api call failed")
             return AskResult("error", detail=str(exc))
 
         if proc.returncode != 0:
@@ -103,7 +102,7 @@ class OpenCodeSession:
         return self._parse_response(stdout)
 
     def _parse_response(self, text: str) -> AskResult:
-        """Parse Z.AI Anthropic-compatible JSON response."""
+        """Parse MiMo OpenAI-compatible JSON response."""
         try:
             data = json.loads(text)
         except json.JSONDecodeError as e:
@@ -112,6 +111,18 @@ class OpenCodeSession:
         if "error" in data:
             return AskResult("error", detail=str(data["error"]))
 
+        # OpenAI format: choices[0].message.content
+        choices = data.get("choices", [])
+        if choices and isinstance(choices[0], dict):
+            message = choices[0].get("message", {})
+            content = message.get("content", "")
+            # Some reasoning models put answer in reasoning_content when content is empty
+            if not content:
+                content = message.get("reasoning_content", "")
+            if content:
+                return AskResult("ok", reply=content)
+
+        # Fallback: try Anthropic format (content array)
         content = data.get("content", [])
         parts: list[str] = []
         for block in content:
@@ -144,8 +155,8 @@ class OpenCodeSession:
             proc = subprocess.run(
                 [
                     "curl", "-s", "-m", "5",
-                    f"{ZAI_BASE_URL}/v1/models",
-                    "-H", "x-api-key: " + ZAI_API_KEY,
+                    f"{MIMO_BASE_URL}/models",
+                    "-H", "Authorization: Bearer " + MIMO_API_KEY,
                 ],
                 capture_output=True, text=True, timeout=10,
             )
@@ -167,3 +178,5 @@ class OpenCodeSession:
 
     def ensure_session(self) -> None:
         pass
+
+
