@@ -1,4 +1,7 @@
-"""Git automation service for vault."""
+"""Git automation service for vault.
+
+Extended with get_head_sha() and revert_commit() for the undo system.
+"""
 
 import logging
 import subprocess
@@ -32,26 +35,22 @@ class VaultGit:
         """Check if there are uncommitted changes."""
         return bool(self.get_status().strip())
 
+    def get_head_sha(self) -> str:
+        """Return current HEAD commit SHA."""
+        result = self._run_git("rev-parse", "HEAD")
+        return result.stdout.strip() if result.returncode == 0 else ""
+
     def commit_changes(self, message: str) -> bool:
-        """Stage all changes and commit.
-
-        Args:
-            message: Commit message
-
-        Returns:
-            True if commit was made, False otherwise
-        """
+        """Stage all changes and commit."""
         if not self.has_changes():
             logger.info("No changes to commit")
             return False
 
-        # Stage all changes
         add_result = self._run_git("add", "-A")
         if add_result.returncode != 0:
             logger.error("Git add failed: %s", add_result.stderr)
             return False
 
-        # Commit
         commit_result = self._run_git("commit", "-m", message)
         if commit_result.returncode != 0:
             logger.error("Git commit failed: %s", commit_result.stderr)
@@ -60,29 +59,37 @@ class VaultGit:
         logger.info("Committed: %s", message)
         return True
 
-    def push(self) -> bool:
-        """Push to remote.
-
-        Returns:
-            True if push was successful
-        """
+    def push(self) -> tuple[bool, str]:
+        """Push to remote. Returns (success, error_message)."""
         result = self._run_git("push")
         if result.returncode != 0:
-            logger.error("Git push failed: %s", result.stderr)
-            return False
+            error = result.stderr.strip()
+            logger.error("Git push failed: %s", error)
+            return False, error
 
         logger.info("Pushed to remote")
-        return True
+        return True, ""
 
     def commit_and_push(self, message: str) -> bool:
-        """Commit all changes and push.
-
-        Args:
-            message: Commit message
-
-        Returns:
-            True if successful
-        """
+        """Commit all changes and push."""
         if self.commit_changes(message):
-            return self.push()
+            success, _ = self.push()
+            return success
         return True  # No changes is not an error
+
+    def revert_commit(self, sha: str) -> tuple[bool, str]:
+        """Revert a specific commit and push. Returns (success, error)."""
+        # Revert
+        result = self._run_git("revert", "--no-edit", sha)
+        if result.returncode != 0:
+            error = result.stderr.strip()
+            logger.error("Git revert failed: %s", error)
+            return False, error
+
+        # Push the revert
+        success, push_error = self.push()
+        if not success:
+            return False, f"Revert committed but push failed: {push_error}"
+
+        logger.info("Reverted commit %s", sha[:8])
+        return True, ""

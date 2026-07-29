@@ -1,4 +1,4 @@
-"""Process command handler."""
+"""Process command handler with progress bar."""
 
 import asyncio
 import logging
@@ -9,6 +9,8 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from d_brain.bot.formatters import format_process_report
+from d_brain.bot.progress import run_with_progress, BusyError
+from d_brain.bot.undo import register_undo, build_undo_keyboard, schedule_button_removal
 from d_brain.config import get_settings
 from d_brain.services.git import VaultGit
 from d_brain.services.runtime import get_ask_lock, get_processor
@@ -19,48 +21,54 @@ logger = logging.getLogger(__name__)
 
 @router.message(Command("process"))
 async def cmd_process(message: Message) -> None:
-    """Handle /process command - trigger Claude processing."""
+    """Handle /process command - trigger Claude processing with progress bar."""
     user_id = message.from_user.id if message.from_user else "unknown"
     logger.info("Process command triggered by user %s", user_id)
 
-    status_msg = await message.answer("⏳ Processing... (may take up to 10 min)")
+    status_msg = await message.answer("⏳ Обработка... (может занять до 10 мин)")
 
     settings = get_settings()
     processor = get_processor(settings)
     git = VaultGit(settings.vault_path)
 
-    # Run subprocess in thread to avoid blocking event loop
-    async def process_with_progress() -> dict:
-        task = asyncio.create_task(
-            asyncio.to_thread(processor.process_daily, date.today())
-        )
+    # Capture SHA before processing
+    sha_before = await asyncio.to_thread(git.get_head_sha)
 
-        elapsed = 0
-        while not task.done():
-            await asyncio.sleep(30)
-            elapsed += 30
-            if not task.done():
-                try:
-                    await status_msg.edit_text(
-                        f"⏳ Processing... ({elapsed // 60}m {elapsed % 60}s)"
-                    )
-                except Exception:
-                    pass  # Ignore edit errors
-
-        return await task
-
-    async with get_ask_lock():
-        report = await process_with_progress()
+    try:
+        async with get_ask_lock():
+            report = await run_with_progress(
+                processor.process_daily,
+                status_msg,
+                "Обработка",
+                date.today(),
+            )
+    except BusyError:
+        await status_msg.edit_text("⏳ AI занят, попробуйте через минуту.")
+        return
 
     # Commit and push changes
     if "error" not in report:
         today = date.today().isoformat()
-        await asyncio.to_thread(git.commit_and_push, f"chore: process daily {today}")
+        commit_sha = await asyncio.to_thread(
+            lambda: git.commit_and_push(f"chore: process daily {today}") or git.get_head_sha()
+        )
 
-    # Format and send report
+        # Add undo button if commit was made
+        sha_after = await asyncio.to_thread(git.get_head_sha)
+        if sha_after and sha_after != sha_before:
+            undo_key = register_undo(sha_after, f"Обработка {today}")
+            undo_kb = build_undo_keyboard(undo_key)
+            formatted = format_process_report(report)
+            try:
+                msg = await status_msg.edit_text(formatted, reply_markup=undo_kb)
+                asyncio.create_task(schedule_button_removal(msg, delay_seconds=300))
+            except Exception:
+                await status_msg.edit_text(formatted, parse_mode=None)
+            return
+
+    # Format and send report (no undo)
     formatted = format_process_report(report)
     try:
         await status_msg.edit_text(formatted)
     except Exception:
-        # Fallback: send without HTML parsing
         await status_msg.edit_text(formatted, parse_mode=None)

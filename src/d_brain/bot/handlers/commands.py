@@ -1,5 +1,6 @@
-"""Command handlers for /start, /help, /status, /new, /compact."""
+"""Command handlers for /start, /help, /status, /new, /compact, /monthly, /recall, /weekly."""
 
+import asyncio
 from datetime import date
 
 from aiogram import Router
@@ -27,6 +28,9 @@ async def cmd_start(message: Message) -> None:
         "/compact — сжать контекст\n"
         "/status — статус дня\n"
         "/process — обработать записи\n"
+        "/weekly — недельный дайджест\n"
+        "/monthly — месячный отчёт\n"
+        "/recall — поиск по vault\n"
         "/help — справка",
         reply_markup=get_main_keyboard(),
     )
@@ -37,14 +41,18 @@ async def cmd_help(message: Message) -> None:
     """Handle /help command."""
     await message.answer(
         "<b>d-brain — персональный ассистент</b>\n\n"
-        "Просто отправляй что угодно — Claude обработает и ответит.\n\n"
+        "Просто отправляй что угодно — AI обработает и ответит.\n\n"
         "🎤 Голосовое — транскрибирую и обработаю\n"
-        "💬 Текст — обработаю как есть\n\n"
+        "💬 Текст — обработаю как есть\n"
+        "📷 Фото — прочитаю и сохраню\n\n"
         "<b>Команды:</b>\n"
         "/new — новый чат (сброс сессии)\n"
         "/compact — сжать контекст сессии\n"
         "/status — статус сегодняшнего дня\n"
-        "/process — обработать записи дня"
+        "/process — обработать записи дня\n"
+        "/weekly — недельный дайджест\n"
+        "/monthly — месячный отчёт\n"
+        "/recall <i>запрос</i> — поиск по vault"
     )
 
 
@@ -55,7 +63,6 @@ async def cmd_status(message: Message) -> None:
     settings = get_settings()
     storage = VaultStorage(settings.vault_path)
 
-    # Log command
     session = SessionStore(settings.vault_path)
     session.append(user_id, "command", cmd="/status")
 
@@ -76,7 +83,6 @@ async def cmd_status(message: Message) -> None:
 
     total = len(entries)
 
-    # Get weekly stats from session
     week_stats = ""
     stats = session.get_stats(user_id, days=7)
     if stats:
@@ -105,24 +111,46 @@ async def cmd_new(message: Message) -> None:
     manager = ChatSessionManager(settings.vault_path)
     manager.reset(message.from_user.id)
 
-    await message.answer("Новая сессия. Контекст очищен.")
+    await message.answer(
+        "🔄 <b>Новый чат</b>\n\n"
+        "Контекст сброшен. Можешь начать заново."
+    )
 
 
 @router.message(Command("compact"))
 async def cmd_compact(message: Message) -> None:
-    """Compact current session context."""
-    if not message.from_user:
-        return
+    """Compact Claude session context."""
+    await message.answer(
+        "📦 Контекст будет сжат при следующем сообщении.\n"
+        "Просто напиши что-нибудь."
+    )
+
+
+@router.message(Command("weekly"))
+async def cmd_weekly(message: Message) -> None:
+    """Handle /weekly command - trigger weekly digest."""
+    from d_brain.services.processor import ClaudeProcessor
+    from d_brain.services.runtime import get_processor
+    from d_brain.services.git import VaultGit
+    from d_brain.bot.formatters import format_process_report
 
     settings = get_settings()
-    manager = ChatSessionManager(settings.vault_path)
+    processor = get_processor(settings)
 
-    await message.chat.do(action="typing")
-    summary = await manager.compact(message.from_user.id)
+    status_msg = await message.answer("📅 Генерирую недельный дайджест...")
 
-    if summary and len(summary) > 500:
-        summary_text = summary[:500] + "..."
-    else:
-        summary_text = summary or "No summary."
+    result = await asyncio.to_thread(processor.process_weekly)
 
-    await message.answer(f"Контекст сжат.\n\n<i>{summary_text}</i>")
+    if "error" in result:
+        await status_msg.edit_text(f"❌ {result['error']}")
+        return
+
+    report = result.get("report", "Нет данных")
+    from d_brain.bot.formatters import sanitize_telegram_html, truncate_html
+    sanitized = sanitize_telegram_html(report)
+    truncated = truncate_html(sanitized, max_length=4000)
+    await status_msg.edit_text(truncated)
+
+    # Git commit
+    git = VaultGit(settings.vault_path)
+    await asyncio.to_thread(git.commit_and_push, f"chore: weekly digest {date.today()}")

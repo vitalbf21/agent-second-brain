@@ -3,6 +3,8 @@
 Voice + text only (v3.0): replaces the legacy split handlers for private chats.
 Every message is saved to daily (safety net) and routed IMMEDIATELY through
 ChatSessionManager for Claude to process and respond — no debounce buffer.
+
+v3.1: Added undo integration and progress bar.
 """
 
 import asyncio
@@ -17,8 +19,10 @@ from aiogram.enums import ChatType
 from aiogram.types import Message
 
 from d_brain.bot.formatters import send_response
+from d_brain.bot.undo import register_undo, build_undo_keyboard, schedule_button_removal
 from d_brain.config import get_settings
 from d_brain.services.chat_session import ChatSessionManager
+from d_brain.services.git import VaultGit
 from d_brain.services.session import SessionStore
 from d_brain.services.storage import VaultStorage
 from d_brain.services.transcription import DeepgramTranscriber
@@ -26,16 +30,10 @@ from d_brain.services.transcription import DeepgramTranscriber
 router = Router(name="chat")
 logger = logging.getLogger(__name__)
 
-# Only handle private chats
 router.message.filter(F.chat.type == ChatType.PRIVATE)
 
 MAX_RESPONSE_LENGTH = 4096
 
-# Slash commands split by BEHAVIOR, not by the leading "/":
-# - control: client-side Claude Code commands — no model turn, fire-and-forget
-# - tui: interactive full-screen UIs — undrivable through a typed pane
-# - everything else (incl. /skill-name) is a normal model turn → marker path
-# /compact is NOT here: commands.router (registered earlier) intercepts it.
 _CONTROL = {"/clear", "/model"}
 _TUI_ONLY = {"/agents", "/config", "/login"}
 
@@ -43,7 +41,6 @@ _manager: ChatSessionManager | None = None
 
 
 def classify_command(text: str) -> str:
-    """'control' | 'tui' | 'turn' for an incoming chat text."""
     if not text.startswith("/"):
         return "turn"
     head = text.split(maxsplit=1)[0]
@@ -58,9 +55,6 @@ _STOP_WORDS = {"/stop", "stop", "стоп"}
 
 
 def classify_concurrent_input(text: str, turn_active: bool) -> str:
-    """'ask' | 'steer' | 'interrupt' — what to do with input that arrives
-    while the agent may be busy. Plain text during an active turn STEERS it
-    (injected mid-turn); a stop word interrupts; otherwise a normal turn."""
     if not turn_active:
         return "ask"
     if text.strip().lower() in _STOP_WORDS:
@@ -69,7 +63,6 @@ def classify_concurrent_input(text: str, turn_active: bool) -> str:
 
 
 def _get_manager() -> ChatSessionManager:
-    """Lazy-init ChatSessionManager singleton."""
     global _manager  # noqa: PLW0603
     if _manager is None:
         settings = get_settings()
@@ -78,8 +71,6 @@ def _get_manager() -> ChatSessionManager:
 
 
 async def _dispatch_text(bot: Bot, chat_id: int, user_id: int, text: str) -> None:
-    """Route a text by behavior: control → fire-and-forget; tui → hint;
-    normal turn (incl. /skill-name) → session via the marker path."""
     kind = classify_command(text)
     if kind == "control":
         await _get_manager().send_control(text)
@@ -103,8 +94,6 @@ async def _dispatch_text(bot: Bot, chat_id: int, user_id: int, text: str) -> Non
         return
     if mode == "steer":
         if not manager.is_steerable_turn():
-            # Maintenance turn (nightly pipeline / doctor / startup) holds
-            # the session — injecting user text would contaminate it.
             await bot.send_message(
                 chat_id,
                 "🔧 Идёт фоновое обслуживание — повтори сообщение через "
@@ -118,19 +107,30 @@ async def _dispatch_text(bot: Bot, chat_id: int, user_id: int, text: str) -> Non
 
 
 async def _process_and_reply(bot: Bot, chat_id: int, user_id: int, prompt: str) -> None:
-    """Send the prompt to the shared session and deliver the reply."""
+    """Send the prompt to the shared session, deliver the reply, and attach undo button if vault changed."""
     typing_task = asyncio.create_task(_typing_loop(bot, chat_id))
     try:
         manager = _get_manager()
+
+        # Capture HEAD SHA before AI processes (for undo)
+        settings = get_settings()
+        git = VaultGit(settings.vault_path)
+        sha_before = await asyncio.to_thread(git.get_head_sha)
+
         response = await manager.send_message(user_id, prompt)
 
         if response:
-            await send_response(bot, chat_id, response)
+            # Check if vault changed (new commit was created)
+            sha_after = await asyncio.to_thread(git.get_head_sha)
+            if sha_after and sha_after != sha_before:
+                # Vault changed — add undo button
+                undo_key = register_undo(sha_after, "AI ответ")
+                undo_kb = build_undo_keyboard(undo_key)
+                await send_response_with_undo(bot, chat_id, response, undo_kb)
+            else:
+                await send_response(bot, chat_id, response)
         else:
-            logger.warning(
-                "Empty response from Claude for user %d, retrying...", user_id
-            )
-            # Retry once before giving up — don't reset session on first empty
+            logger.warning("Empty response from Claude for user %d, retrying...", user_id)
             response = await manager.send_message(user_id, prompt)
             if response:
                 await send_response(bot, chat_id, response)
@@ -152,8 +152,32 @@ async def _process_and_reply(bot: Bot, chat_id: int, user_id: int, prompt: str) 
         typing_task.cancel()
 
 
+async def send_response_with_undo(bot: Any, chat_id: int, text: str, undo_kb) -> None:
+    """Send Claude reply with undo keyboard attached."""
+    from d_brain.bot.formatters import sanitize_telegram_html, validate_telegram_html, split_text
+    import html as html_mod
+
+    sanitized = sanitize_telegram_html(text)
+    if not validate_telegram_html(sanitized):
+        sanitized = html_mod.escape(text)
+
+    chunks = split_text(sanitized, MAX_RESPONSE_LENGTH)
+    for i, chunk in enumerate(chunks):
+        try:
+            if i == len(chunks) - 1:
+                # Last chunk gets the undo keyboard
+                msg = await bot.send_message(chat_id, chunk, reply_markup=undo_kb)
+                # Schedule keyboard removal after 5 minutes
+                asyncio.create_task(schedule_button_removal(msg, delay_seconds=300))
+            else:
+                await bot.send_message(chat_id, chunk)
+        except Exception:
+            await bot.send_message(chat_id, chunk, parse_mode=None)
+        if i < len(chunks) - 1:
+            await asyncio.sleep(0.3)
+
+
 async def _typing_loop(bot: Bot, chat_id: int) -> None:
-    """Send typing action every 4 seconds while processing."""
     try:
         while True:
             await bot.send_chat_action(chat_id, "typing")
@@ -162,15 +186,12 @@ async def _typing_loop(bot: Bot, chat_id: int) -> None:
         pass
 
 
-# --- Media input (photo / document / video / audio / animation / video_note) ---
-
 UNSUPPORTED_REPLY = (
     "Я принимаю голос, текст, фото и файлы. "
     "Этот тип сообщения обработать не могу."
 )
 
 _MEDIA_EXTRACTORS = (
-    # (kind, attr, default extension)
     ("document", "document", None),
     ("video", "video", "mp4"),
     ("audio", "audio", "mp3"),
@@ -180,11 +201,6 @@ _MEDIA_EXTRACTORS = (
 
 
 def extract_media(message: Any) -> tuple[str, str, str, str | None]:
-    """(kind, file_id, extension, original_name) for a media message.
-
-    Photos are a size ladder — take the largest. Documents/audio keep the
-    original file name (its extension wins over the default).
-    """
     if getattr(message, "photo", None):
         return ("photo", message.photo[-1].file_id, "jpg", None)
     for kind, attr, default_ext in _MEDIA_EXTRACTORS:
@@ -195,7 +211,6 @@ def extract_media(message: Any) -> tuple[str, str, str, str | None]:
         ext = default_ext or "bin"
         if name and "." in name:
             candidate = name.rsplit(".", 1)[-1].lower()
-            # file_name is sender-controlled — never let it shape the path
             if re.fullmatch(r"[a-z0-9]{1,10}", candidate):
                 ext = candidate
         return (kind, obj.file_id, ext, name)
@@ -203,13 +218,11 @@ def extract_media(message: Any) -> tuple[str, str, str, str | None]:
 
 
 def forward_note(origin: Any) -> str:
-    """Human-readable forward attribution, or '' for a non-forward."""
     if origin is None:
         return ""
     user = getattr(origin, "sender_user", None)
     if user is not None:
         return f"[переслано от: {user.full_name}]\n"
-    # MessageOriginChannel carries .chat, MessageOriginChat carries .sender_chat
     chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
     if chat is not None:
         return f"[переслано из: {chat.title}]\n"
@@ -222,8 +235,6 @@ def forward_note(origin: Any) -> str:
 def build_media_prompt(
     *, kind: str, rel_path: str, original_name: str | None, caption: str, fwd: str
 ) -> str:
-    """Prompt for the brain: it lives in the vault and can Read the file
-    itself (images, PDFs, text) — we only hand it the path and context."""
     name_part = f" (имя файла: {original_name})" if original_name else ""
     caption_part = f"\nПодпись: {caption}" if caption else ""
     return (
@@ -234,9 +245,6 @@ def build_media_prompt(
     )
 
 
-# Telegram albums arrive as N separate messages sharing media_group_id.
-# Buffer them briefly and hand the brain ONE prompt with all paths —
-# otherwise an album means N long brain turns over the same context.
 ALBUM_SETTLE = 1.5
 _album_buf: dict[str, list[dict[str, str]]] = {}
 _album_tasks: dict[str, asyncio.Task] = {}
@@ -278,7 +286,6 @@ async def _flush_album(bot: Bot, chat_id: int, user_id: int, group_id: str) -> N
 
 @router.message(F.voice)
 async def handle_chat_voice(message: Message, bot: Bot) -> None:
-    """Handle voice messages in private chat."""
     if not message.voice or not message.from_user:
         return
 
@@ -302,11 +309,9 @@ async def handle_chat_voice(message: Message, bot: Bot) -> None:
             await message.answer("Could not transcribe audio")
             return
 
-        # Safety net: save to daily
         timestamp = datetime.fromtimestamp(message.date.timestamp())
         storage.append_to_daily(transcript, timestamp, "[voice]")
 
-        # Log to session
         session = SessionStore(settings.vault_path)
         session.append(
             message.from_user.id,
@@ -330,12 +335,6 @@ async def handle_chat_voice(message: Message, bot: Bot) -> None:
 
 @router.message(F.text)
 async def handle_chat_text(message: Message, bot: Bot) -> None:
-    """Handle text messages in private chat.
-
-    Bot-level commands (/start, /help, …) are intercepted by routers
-    registered earlier; anything that reaches here — including Claude Code
-    slash commands and /skill-name invocations — is dispatched by behavior.
-    """
     if not message.text or not message.from_user:
         return
 
@@ -345,11 +344,9 @@ async def handle_chat_text(message: Message, bot: Bot) -> None:
     fwd = forward_note(getattr(message, "forward_origin", None))
     text = f"{fwd}{message.text}" if fwd else message.text
 
-    # Safety net: save to daily
     timestamp = datetime.fromtimestamp(message.date.timestamp())
     storage.append_to_daily(text, timestamp, "[forward]" if fwd else "[text]")
 
-    # Log to session
     session = SessionStore(settings.vault_path)
     session.append(
         message.from_user.id,
@@ -365,8 +362,6 @@ async def handle_chat_text(message: Message, bot: Bot) -> None:
     F.photo | F.document | F.video | F.audio | F.animation | F.video_note
 )
 async def handle_chat_media(message: Message, bot: Bot) -> None:
-    """Handle any file-bearing message: download into the vault's
-    attachments and hand the PATH to the brain — it reads the file itself."""
     if not message.from_user:
         return
 
@@ -396,7 +391,6 @@ async def handle_chat_media(message: Message, bot: Bot) -> None:
             file_bytes.read(), timestamp.date(), timestamp, ext
         )
 
-        # Safety net: save to daily with an Obsidian embed
         daily_entry = f"{fwd}![[{rel_path}]]"
         if caption:
             daily_entry += f"\n\n{caption}"
@@ -437,8 +431,6 @@ async def handle_chat_media(message: Message, bot: Bot) -> None:
 
     except Exception as e:
         logger.exception("Error processing media in chat")
-        # Bot API can't hand us files >20MB — keep the librarian promise:
-        # the fact and the caption still land in daily.
         if "too big" in str(e).lower():
             note = f"{fwd}(файл >20MB — Telegram не отдаёт его ботам)"
             if caption:
@@ -457,5 +449,4 @@ async def handle_chat_media(message: Message, bot: Bot) -> None:
 
 @router.message()
 async def handle_chat_other(message: Message) -> None:
-    """Catch-all: never go silent — tell the user what the bot accepts."""
     await message.answer(UNSUPPORTED_REPLY)

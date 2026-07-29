@@ -30,6 +30,22 @@ class Settings(BaseSettings):
         description="Whether to allow access to all users (security risk!)",
     )
 
+    # ── Todoist integration ────────────────────────────────────────
+    todoist_api_key: str = Field(
+        default="",
+        description="Todoist REST API key for task management",
+    )
+
+    # ── Feature flags ──────────────────────────────────────────────
+    monthly_enabled: bool = Field(
+        default=True,
+        description="Enable monthly report generation",
+    )
+    recall_enabled: bool = Field(
+        default=True,
+        description="Enable vault search (/recall)",
+    )
+
     # ── OpenCode settings ────────────────────────────────────────────
     opencode_model: str = Field(
         default="opencode/big-pickle",
@@ -84,12 +100,6 @@ class Settings(BaseSettings):
     @field_validator("runtime_dir", "vault_path", mode="after")
     @classmethod
     def _expand_user(cls, v: Path) -> Path:
-        # pydantic-settings keeps "~" literal; the cron CLI expanduser-s —
-        # expand here too or the bot and CLI split into different state dirs.
-        # resolve() makes the path ABSOLUTE: the brain runs `cd vault && cat
-        # deploy/brain-system.md`, and a relative vault_path would make that
-        # cat (and --mcp-config) resolve against the wrong cwd → persona
-        # silently not loaded. One root of absoluteness for all derived paths.
         return v.expanduser().resolve()
 
     @property

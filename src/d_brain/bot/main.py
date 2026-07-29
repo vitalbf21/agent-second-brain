@@ -1,4 +1,7 @@
-"""Telegram bot initialization and polling/webhook."""
+"""Telegram bot initialization and polling/webhook.
+
+v3.1: Added monthly/recall routers and APScheduler for monthly reports.
+"""
 
 import asyncio
 import logging
@@ -36,14 +39,20 @@ def create_dispatcher() -> Dispatcher:
         commands,
         process,
     )
+    from d_brain.bot.handlers.monthly import router as monthly_router
+    from d_brain.bot.handlers.recall import router as recall_router
+    from d_brain.bot.undo import router as undo_router
 
     dp = Dispatcher(storage=MemoryStorage())
 
     # Register routers - ORDER MATTERS
     dp.include_router(commands.router)
     dp.include_router(process.router)
-    dp.include_router(buttons.router)  # Reply keyboard buttons
-    dp.include_router(chat.router)  # Catch-all for private chat (LAST)
+    dp.include_router(monthly_router)    # /monthly
+    dp.include_router(recall_router)     # /recall
+    dp.include_router(undo_router)       # undo callback queries
+    dp.include_router(buttons.router)    # Reply keyboard buttons
+    dp.include_router(chat.router)       # Catch-all for private chat (LAST)
     return dp
 
 
@@ -59,7 +68,6 @@ def create_auth_middleware(settings: Settings) -> MiddlewareType:
         event: Update,
         data: dict[str, Any],
     ) -> Any:
-        # If explicitly allowed all users, just bypass check
         if settings.allow_all_users:
             return await handler(event, data)
 
@@ -69,7 +77,6 @@ def create_auth_middleware(settings: Settings) -> MiddlewareType:
         elif event.callback_query:
             user = event.callback_query.from_user
 
-        # If no users allowed and not allow_all_users -> deny everyone
         if not settings.allowed_user_ids:
             logger.warning(
                 "Access denied: no allowed_user_ids configured and "
@@ -77,7 +84,6 @@ def create_auth_middleware(settings: Settings) -> MiddlewareType:
             )
             return None
 
-        # Check if user is in allowed list
         if user and user.id not in settings.allowed_user_ids:
             logger.warning("Unauthorized access attempt from user %s", user.id)
             return None
@@ -95,12 +101,48 @@ async def _watchdog_pinger() -> None:
         notify("WATCHDOG=1")
 
 
+def _create_scheduler(bot: "Bot", settings: Settings):
+    """Create APScheduler with monthly report jobs."""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from d_brain.bot.handlers.monthly import scheduled_monthly_report, scheduled_monthly_reminder
+
+    scheduler = AsyncIOScheduler(timezone=settings.tz)
+
+    if settings.monthly_enabled and settings.admin_chat_id:
+        chat_id = settings.admin_chat_id
+
+        # Monthly report on 1st at 20:30
+        scheduler.add_job(
+            scheduled_monthly_report,
+            "cron",
+            day=1,
+            hour=20,
+            minute=30,
+            args=[bot, chat_id],
+            id="monthly_report",
+            replace_existing=True,
+        )
+
+        # Monthly reminder on 2nd-3rd at 20:30
+        scheduler.add_job(
+            scheduled_monthly_reminder,
+            "cron",
+            day="2,3",
+            hour=20,
+            minute=30,
+            args=[bot, chat_id],
+            id="monthly_reminder",
+            replace_existing=True,
+        )
+
+    return scheduler
+
+
 async def run_bot(settings: Settings) -> None:
     """Run the bot with polling."""
     bot = create_bot(settings)
     dp = create_dispatcher()
 
-    # Always add auth middleware for security (it handles allow_all_users internally)
     dp.update.middleware(create_auth_middleware(settings))
 
     notify("READY=1")
@@ -108,6 +150,11 @@ async def run_bot(settings: Settings) -> None:
     cron_task = (
         asyncio.create_task(run_cron(settings, bot)) if settings.cron_enabled else None
     )
+
+    # Start APScheduler for monthly reports
+    scheduler = _create_scheduler(bot, settings)
+    scheduler.start()
+    logger.info("APScheduler started with monthly jobs")
 
     logger.info("Starting bot polling...")
     try:
@@ -116,6 +163,7 @@ async def run_bot(settings: Settings) -> None:
         pinger.cancel()
         if cron_task is not None:
             cron_task.cancel()
+        scheduler.shutdown(wait=False)
         await bot.session.close()
 
 
@@ -124,7 +172,6 @@ async def run_bot_webhook(settings: Settings) -> None:
     bot = create_bot(settings)
     dp = create_dispatcher()
 
-    # Always add auth middleware for security (it handles allow_all_users internally)
     dp.update.middleware(create_auth_middleware(settings))
 
     notify("READY=1")
@@ -133,7 +180,10 @@ async def run_bot_webhook(settings: Settings) -> None:
         asyncio.create_task(run_cron(settings, bot)) if settings.cron_enabled else None
     )
 
-    # Register webhook with Telegram
+    # Start APScheduler
+    scheduler = _create_scheduler(bot, settings)
+    scheduler.start()
+
     webhook_url = f"{settings.webhook_host}/webhook/{settings.telegram_bot_token}"
     webhook_path = f"/webhook/{settings.telegram_bot_token}"
 
@@ -153,11 +203,9 @@ async def run_bot_webhook(settings: Settings) -> None:
                 logger.error("Failed to set webhook after 5 attempts")
                 raise
 
-    # Create aiohttp application
     app = web.Application()
 
     async def handle_webhook(request: web.Request) -> web.Response:
-        """Handle incoming webhook updates from Telegram."""
         try:
             update = Update.model_validate(await request.json())
             await dp.feed_update(bot, update)
@@ -166,13 +214,11 @@ async def run_bot_webhook(settings: Settings) -> None:
         return web.Response()
 
     async def handle_health(request: web.Request) -> web.Response:
-        """Health check endpoint."""
         return web.Response(text="OK")
 
     app.router.add_post(webhook_path, handle_webhook)
     app.router.add_get("/health", handle_health)
 
-    # Start webhook server
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", settings.webhook_port)
@@ -180,11 +226,11 @@ async def run_bot_webhook(settings: Settings) -> None:
     logger.info("Webhook server started on port %d", settings.webhook_port)
 
     try:
-        # Keep running until cancelled
         await asyncio.Event().wait()
     finally:
         pinger.cancel()
         if cron_task is not None:
             cron_task.cancel()
+        scheduler.shutdown(wait=False)
         await runner.cleanup()
         await bot.session.close()
