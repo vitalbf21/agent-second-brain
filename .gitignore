@@ -41,3 +41,6 @@ vault/thoughts/
 /.agents/
 /.claude/
 /skills-lock.json
+
+# Local-only CI config (excluded from history push to avoid workflow scope requirement)
+.github/workflows/
