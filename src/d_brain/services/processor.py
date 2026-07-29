@@ -54,6 +54,11 @@ class ClaudeProcessor:
         skill_path = self.vault_path / ".claude/skills/dbrain-processor/SKILL.md"
         return skill_path.read_text() if skill_path.exists() else ""
 
+    def _load_agent_content(self, name: str) -> str:
+        """Read an agent instruction file from vault/.claude/agents/."""
+        agent_path = self.vault_path / ".claude/agents" / f"{name}.md"
+        return agent_path.read_text() if agent_path.exists() else ""
+
     def process_daily(self, day: date | None = None) -> dict[str, Any]:
         if day is None:
             day = date.today()
@@ -80,4 +85,33 @@ CRITICAL OUTPUT FORMAT:
 - Start directly with 📊 <b>Обработка за {day}</b>
 - Allowed tags: <b>, <i>, <code>, <s>, <u>
 - If entries already processed, return status report in same HTML format"""
+        return self._ask(prompt, wrap=True)
+
+    def process_weekly(self) -> dict[str, Any]:
+        """Generate the weekly digest through the shared OpenCode session.
+
+        Mirrors :meth:`process_daily` but drives the ``weekly-digest`` agent
+        instructions and analyses the last 7 days instead of a single day.
+        """
+        agent_content = self._load_agent_content("weekly-digest")
+
+        prompt = f"""Выполни генерацию недельного дайджеста за последнюю неделю.
+
+=== WEEKLY DIGEST AGENT ===
+{agent_content}
+=== END AGENT ===
+
+ЯДРО ДАЙДЖЕСТА:
+1. Проанализируй daily-заметки за последние 7 дней (daily/YYYY-MM-DD.md)
+2. Оцени прогресс по целям (goals/) — победы, вызовы, динамику
+3. Предложи ONE Big Thing и топ-3 приоритета на следующую неделю
+4. При наличии архивируй текущий goals/3-weekly.md и создай новый
+
+CRITICAL OUTPUT FORMAT:
+- Return ONLY raw HTML for Telegram (parse_mode=HTML)
+- NO markdown: no **, no ## , no ```, no tables
+- Start directly with 📅 <b>Недельный дайджест</b>
+- Allowed tags: <b>, <i>, <code>, <s>, <u>
+- If there is nothing to digest (нет данных за неделю), return a short
+  status note in the same HTML format instead of an empty report."""
         return self._ask(prompt, wrap=True)
